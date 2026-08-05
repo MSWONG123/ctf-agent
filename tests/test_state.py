@@ -22,6 +22,8 @@ def test_add_target_creates_entry():
     assert t["findings"]["dns"] == {}
     assert t["findings"]["vulns"] == []
     assert t["findings"]["crypto"] == []
+    assert t["findings"]["binaries"] == []
+    assert t["findings"]["files"] == []
     assert t["findings"]["notes"] == []
 
 
