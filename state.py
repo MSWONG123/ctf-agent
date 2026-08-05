@@ -22,6 +22,8 @@ def add_target(state: dict, target: str) -> None:
             "dns": {},
             "vulns": [],
             "crypto": [],
+            "binaries": [],
+            "files": [],
             "notes": [],
         },
     }

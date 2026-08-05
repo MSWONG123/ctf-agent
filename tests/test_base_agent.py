@@ -45,7 +45,7 @@ def test_base_agent_init():
     client = MagicMock()
     agent = BaseAgent("test", "You are a test agent.", [], {}, client)
     assert agent.name == "test"
-    assert agent.max_iterations == 20
+    assert agent.max_iterations == 40
 
 
 def test_base_agent_run_text_only():

@@ -13,6 +13,11 @@ sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 from agents.recon import create_recon_agent
 from agents.web_exploit import create_web_exploit_agent
 from agents.crypto import create_crypto_agent
+from agents.netcat import create_netcat_agent
+from agents.reversing import create_reversing_agent
+from agents.forensics import create_forensics_agent
+from agents.blockchain import create_blockchain_agent
+from agents.ai_ml import create_ai_ml_agent
 from agents.report import generate_report
 from recon_agent import load_api_key
 from state import (
@@ -27,8 +32,13 @@ ORCHESTRATOR_SYSTEM_PROMPT = """You are a CTF orchestrator. You coordinate speci
 
 Available agents:
 - recon: Port scanning, DNS, web discovery, enumeration
-- web_exploit: SQLi, XSS, LFI, header injection on web services
-- crypto: Decode/crack encoded data, hashes, ciphers
+- web_exploit: SQLi, XSS, LFI, SSRF, SSTI, command injection, JWT, cookies
+- crypto: Classical ciphers, RSA, AES, hashing, encoding chains, PRNG
+- reversing: Binary analysis, disassembly, ELF parsing, buffer overflow, ROP, shellcode
+- forensics: File carving, steganography, metadata, pcap, entropy, ZIP cracking
+- blockchain: Smart contract analysis, Solidity vulns, ABI/tx decoding, EVM bytecode
+- ai_ml: Model probing, boundary finding, weight recovery, adversarial inputs
+- netcat: Raw interactive TCP sessions (fallback for live socket IO)
 
 Based on the current state of all targets, propose the SINGLE best next action.
 
@@ -39,9 +49,14 @@ TASK: <specific instruction for the agent>
 REASON: <why this action is the best next step>
 
 Rules:
-- Always run recon first on new targets before other agents.
+- Always run recon first on new network targets before other agents.
 - Run web_exploit only after recon has found web services.
-- Run crypto only when encoded/encrypted data has been found.
+- Run reversing when challenge involves a binary file.
+- Run forensics when challenge involves an image, pcap, archive, or unknown file.
+- Run blockchain when challenge involves Solidity, EVM, or on-chain data.
+- Run ai_ml when challenge involves a model, perceptron, or classifier.
+- Run crypto when encoded/encrypted data is found.
+- Run netcat as fallback for interactive services not covered by other agents.
 - If all targets are fully scanned, respond with: ACTION: report
 - Be specific in TASK — reference actual ports, paths, and findings."""
 
@@ -55,6 +70,11 @@ class Orchestrator:
             "recon": lambda: create_recon_agent(client),
             "web_exploit": lambda: create_web_exploit_agent(client),
             "crypto": lambda: create_crypto_agent(client),
+            "netcat": lambda: create_netcat_agent(client),
+            "reversing": lambda: create_reversing_agent(client),
+            "forensics": lambda: create_forensics_agent(client),
+            "blockchain": lambda: create_blockchain_agent(client),
+            "ai_ml": lambda: create_ai_ml_agent(client),
         }
 
     def propose_action(self) -> str:
