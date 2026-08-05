@@ -65,7 +65,7 @@ class Orchestrator:
     def __init__(self, client: anthropic.Anthropic, state: dict):
         self.client = client
         self.state = state
-        self.auto_mode = False
+        self.auto_mode = True
         self.agents = {
             "recon": lambda: create_recon_agent(client),
             "web_exploit": lambda: create_web_exploit_agent(client),

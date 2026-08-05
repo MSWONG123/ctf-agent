@@ -17,7 +17,7 @@ def test_orchestrator_init():
     client = MagicMock()
     state = create_state()
     orch = Orchestrator(client, state)
-    assert orch.auto_mode is False
+    assert orch.auto_mode is True
 
 
 def test_orchestrator_propose_action():
