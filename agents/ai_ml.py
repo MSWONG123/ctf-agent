@@ -36,6 +36,8 @@ def tool_probe_model(
 ) -> str:
     """Send input to a model and get output. Supports TCP and HTTP."""
     if method == "http" or url:
+        if method == "http" and not url:
+            return "ERROR: url is required for HTTP mode"
         try:
             if url:
                 payload = json.dumps({"input": data}).encode()
@@ -234,10 +236,15 @@ def tool_ascii_pattern_send(
     target_bits: str,
     zero_values: list,
     one_values: list,
-) -> list:
+) -> str:
     """Compute a sequence of values that produces a target bit pattern.
 
-    Returns the list of values to send (avoids back-to-back repeats).
+    Returns a string representation of the list of values to send
+    (avoids back-to-back repeats).
+
+    Note: if a group has only one value, back-to-back repeat avoidance
+    cannot be applied for consecutive bits in that group and the single
+    value will be repeated — this is an accepted edge-case limitation.
     """
     sequence = []
     for bit in target_bits:
@@ -247,7 +254,9 @@ def tool_ascii_pattern_send(
             vals = one_values
 
         if sequence and sequence[-1] in vals:
-            # Pick a different value from the same group
+            # Pick a different value from the same group.
+            # If the group has only one value, the for-else falls through and
+            # vals[0] is appended anyway (repeat unavoidable — edge case).
             for v in vals:
                 if v != sequence[-1]:
                     sequence.append(v)
@@ -257,7 +266,7 @@ def tool_ascii_pattern_send(
         else:
             sequence.append(vals[0])
 
-    return sequence
+    return str(sequence)
 
 
 # --- Tool definitions ---

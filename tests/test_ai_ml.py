@@ -68,12 +68,16 @@ def test_confusion_matrix():
 
 
 def test_ascii_pattern_send():
+    import ast
     result = tool_ascii_pattern_send(
         target_bits="01110000",
         zero_values=[-10, -9],
         one_values=[10, 9],
     )
-    assert len(result) == 8
+    assert isinstance(result, str)
+    # Parse back to a list to verify sequence properties
+    parsed = ast.literal_eval(result)
+    assert len(parsed) == 8
     # Verify no back-to-back repeats
-    for i in range(1, len(result)):
-        assert result[i] != result[i - 1]
+    for i in range(1, len(parsed)):
+        assert parsed[i] != parsed[i - 1]
