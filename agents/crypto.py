@@ -1,9 +1,11 @@
-"""Crypto agent — decoding, hash ID, cipher brute-force, frequency analysis."""
+"""Crypto agent — decoding, hash ID, cipher brute-force, frequency analysis, RSA, AES, Vigenere, mod math."""
 
 import base64
 import binascii
 import hashlib
+import math
 import string
+import struct
 from collections import Counter
 
 import anthropic
@@ -135,6 +137,489 @@ def tool_frequency_analysis(text: str) -> str:
     return "\n".join(lines)
 
 
+def tool_rsa_analyze(n: int, e: int, c: int, p: int = 0, q: int = 0) -> str:
+    """Analyze RSA parameters and attempt common attacks."""
+    results = [f"RSA Analysis: n={n}, e={e}, c={c}"]
+
+    # If p and q given, just decrypt
+    if p and q:
+        phi = (p - 1) * (q - 1)
+        d = pow(e, -1, phi)
+        m = pow(c, d, n)
+        try:
+            plaintext = m.to_bytes((m.bit_length() + 7) // 8, "big").decode(errors="replace")
+        except Exception:
+            plaintext = str(m)
+        results.append(f"Factors given: p={p}, q={q}")
+        results.append(f"d = {d}")
+        results.append(f"Plaintext (int): {m}")
+        results.append(f"Plaintext (str): {plaintext}")
+        return "\n".join(results)
+
+    # Attack 1: Small e (cube root)
+    if e <= 5:
+        results.append(f"\n[Attack] Small e={e} — trying integer root")
+        for m_candidate in range(2, 100000):
+            if pow(m_candidate, e) == c:
+                results.append(f"SUCCESS: m = {m_candidate}")
+                try:
+                    plaintext = m_candidate.to_bytes((m_candidate.bit_length() + 7) // 8, "big").decode(errors="replace")
+                    results.append(f"Plaintext: {plaintext}")
+                except Exception:
+                    pass
+                return "\n".join(results)
+        # Try integer e-th root
+        m_approx = int(round(c ** (1.0 / e)))
+        for delta in range(-2, 3):
+            m_test = m_approx + delta
+            if m_test > 0 and pow(m_test, e) == c:
+                results.append(f"SUCCESS: m = {m_test}")
+                return "\n".join(results)
+        results.append("Small-e root attack: no exact root found (c may be reduced mod n)")
+
+    # Attack 2: Fermat factorization (works when p and q are close)
+    results.append("\n[Attack] Fermat factorization")
+    a = math.isqrt(n)
+    if a * a < n:
+        a += 1
+    for i in range(100000):
+        b2 = a * a - n
+        b = math.isqrt(b2)
+        if b * b == b2:
+            p_found = a + b
+            q_found = a - b
+            if p_found * q_found == n and p_found > 1 and q_found > 1:
+                results.append(f"SUCCESS: p={p_found}, q={q_found}")
+                phi = (p_found - 1) * (q_found - 1)
+                try:
+                    d = pow(e, -1, phi)
+                    m = pow(c, d, n)
+                    results.append(f"d = {d}")
+                    results.append(f"Plaintext (int): {m}")
+                    try:
+                        plaintext = m.to_bytes((m.bit_length() + 7) // 8, "big").decode(errors="replace")
+                        results.append(f"Plaintext (str): {plaintext}")
+                    except Exception:
+                        pass
+                except Exception as ex:
+                    results.append(f"Decryption failed: {ex}")
+                return "\n".join(results)
+        a += 1
+
+    results.append("Fermat: no close factors found in 100k iterations")
+
+    # Attack 3: Wiener's (large e)
+    if e > n // 3:
+        results.append("\n[Attack] Wiener's attack (large e)")
+
+        def continued_fraction(num, den):
+            cf = []
+            while den:
+                q_val = num // den
+                cf.append(q_val)
+                num, den = den, num - q_val * den
+            return cf
+
+        def convergents(cf):
+            convs = []
+            h_prev, h_curr = 0, 1
+            k_prev, k_curr = 1, 0
+            for a_val in cf:
+                h_prev, h_curr = h_curr, a_val * h_curr + h_prev
+                k_prev, k_curr = k_curr, a_val * k_curr + k_prev
+                convs.append((h_curr, k_curr))
+            return convs
+
+        cf = continued_fraction(e, n)
+        for k, d in convergents(cf):
+            if k == 0:
+                continue
+            phi_candidate = (e * d - 1) // k
+            s = n - phi_candidate + 1
+            disc = s * s - 4 * n
+            if disc >= 0:
+                sqrt_disc = math.isqrt(disc)
+                if sqrt_disc * sqrt_disc == disc:
+                    p_w = (s + sqrt_disc) // 2
+                    q_w = (s - sqrt_disc) // 2
+                    if p_w * q_w == n:
+                        results.append(f"SUCCESS: p={p_w}, q={q_w}, d={d}")
+                        m = pow(c, d, n)
+                        results.append(f"Plaintext (int): {m}")
+                        return "\n".join(results)
+        results.append("Wiener's: no valid convergent found")
+
+    return "\n".join(results)
+
+
+def tool_aes_decrypt(ciphertext: str, key: str, iv: str = "", mode: str = "ECB") -> str:
+    """Decrypt AES-ECB or AES-CBC."""
+    try:
+        ct = bytes.fromhex(ciphertext.replace(" ", "").replace("0x", ""))
+        k = bytes.fromhex(key.replace(" ", "").replace("0x", ""))
+    except ValueError as ex:
+        return f"ERROR parsing hex: {ex}"
+
+    # Try PyCryptodome
+    try:
+        from Crypto.Cipher import AES as AES_Crypto
+        if mode.upper() == "CBC":
+            iv_bytes = bytes.fromhex(iv.replace(" ", "").replace("0x", "")) if iv else b"\x00" * 16
+            cipher = AES_Crypto.new(k, AES_Crypto.MODE_CBC, iv_bytes)
+        else:
+            cipher = AES_Crypto.new(k, AES_Crypto.MODE_ECB)
+        plaintext = cipher.decrypt(ct)
+        # Remove PKCS7 padding
+        pad_len = plaintext[-1]
+        if 1 <= pad_len <= 16 and plaintext[-pad_len:] == bytes([pad_len]) * pad_len:
+            plaintext = plaintext[:-pad_len]
+        return f"Decrypted: {plaintext.decode(errors='replace')}\nHex: {plaintext.hex()}"
+    except ImportError:
+        pass
+
+    return "ERROR: AES decryption requires PyCryptodome. Install with: pip install pycryptodome"
+
+
+def tool_vigenere_crack(ciphertext: str, max_key_len: int = 20) -> str:
+    """Crack a Vigenere cipher using Kasiski/frequency analysis."""
+    ct = "".join(c.upper() for c in ciphertext if c.isalpha())
+    if not ct:
+        return "No alphabetic characters in ciphertext."
+
+    def ic(text):
+        n = len(text)
+        if n < 2:
+            return 0
+        freq = [0] * 26
+        for c in text:
+            freq[ord(c) - ord('A')] += 1
+        return sum(f * (f - 1) for f in freq) / (n * (n - 1))
+
+    results = ["Vigenere analysis:"]
+
+    best_key_len = 1
+    best_ic = 0
+    for kl in range(1, min(max_key_len + 1, len(ct) // 2)):
+        groups = [ct[i::kl] for i in range(kl)]
+        avg_ic = sum(ic(g) for g in groups) / kl
+        if avg_ic > best_ic:
+            best_ic = avg_ic
+            best_key_len = kl
+
+    results.append(f"Most likely key length: {best_key_len} (IC={best_ic:.4f})")
+
+    english_freq = [0.082, 0.015, 0.028, 0.043, 0.127, 0.022, 0.020, 0.061,
+                    0.070, 0.002, 0.008, 0.040, 0.024, 0.067, 0.075, 0.019,
+                    0.001, 0.060, 0.063, 0.091, 0.028, 0.010, 0.023, 0.002,
+                    0.020, 0.001]
+
+    key = []
+    for pos in range(best_key_len):
+        group = ct[pos::best_key_len]
+        best_shift = 0
+        best_score = -1
+        for shift in range(26):
+            score = 0
+            for c in group:
+                decrypted_idx = (ord(c) - ord('A') - shift) % 26
+                score += english_freq[decrypted_idx]
+            if score > best_score:
+                best_score = score
+                best_shift = shift
+        key.append(chr(best_shift + ord('A')))
+
+    key_str = "".join(key)
+    results.append(f"Key: {key_str}")
+
+    plaintext = []
+    for i, c in enumerate(ct):
+        shift = ord(key[i % len(key)]) - ord('A')
+        plaintext.append(chr((ord(c) - ord('A') - shift) % 26 + ord('A')))
+    results.append(f"Decrypted: {''.join(plaintext)}")
+
+    return "\n".join(results)
+
+
+def tool_mod_math(operation: str, a: int = 0, b: int = 0, m: int = 0,
+                  remainders: list = None, moduli: list = None) -> str:
+    """Modular arithmetic operations: modpow, modinv, crt, discrete_log."""
+    if operation == "modpow":
+        result = pow(a, b, m)
+        return f"{a}^{b} mod {m} = {result}"
+
+    elif operation == "modinv":
+        try:
+            result = pow(a, -1, m)
+            return f"{a}^(-1) mod {m} = {result}"
+        except ValueError:
+            return f"No modular inverse: gcd({a}, {m}) != 1"
+
+    elif operation == "crt":
+        if not remainders or not moduli or len(remainders) != len(moduli):
+            return "CRT requires equal-length remainders and moduli lists."
+
+        M = 1
+        for mi in moduli:
+            M *= mi
+
+        x = 0
+        for ri, mi in zip(remainders, moduli):
+            Mi = M // mi
+            yi = pow(Mi, -1, mi)
+            x += ri * Mi * yi
+
+        x = x % M
+        return f"CRT solution: x = {x} (mod {M})"
+
+    elif operation == "discrete_log":
+        # Baby-step giant-step for small groups
+        n = math.isqrt(m) + 1
+        table = {}
+        val = 1
+        for j in range(n + 1):
+            table[val] = j
+            val = (val * a) % m
+
+        try:
+            factor = pow(a, -n, m)
+        except ValueError:
+            return f"Discrete log: a={a} has no inverse mod {m}"
+        gamma = b
+        for i in range(n + 1):
+            if gamma in table:
+                result = i * n + table[gamma]
+                return f"Discrete log: log_{a}({b}) mod {m} = {result}"
+            gamma = (gamma * factor) % m
+        return "Discrete log not found (group may be too large)"
+
+    return f"Unknown operation: {operation}. Use: modpow, modinv, crt, discrete_log"
+
+
+def tool_padding_oracle(oracle_url: str, ciphertext: str, block_size: int = 16) -> str:
+    """Padding oracle attack description and simulation (CBC mode)."""
+    import json
+    import urllib.request
+    import urllib.error
+
+    try:
+        ct = bytes.fromhex(ciphertext.replace(" ", "").replace("0x", ""))
+    except ValueError as ex:
+        return f"ERROR parsing ciphertext hex: {ex}"
+
+    if len(ct) % block_size != 0:
+        return f"ERROR: ciphertext length ({len(ct)}) not multiple of block size ({block_size})"
+
+    blocks = [ct[i:i + block_size] for i in range(0, len(ct), block_size)]
+    if len(blocks) < 2:
+        return "Need at least 2 blocks (IV + ciphertext)."
+
+    def check_padding(modified_ct):
+        try:
+            req = urllib.request.Request(
+                oracle_url,
+                data=json.dumps({"ciphertext": modified_ct.hex()}).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                body = resp.read().decode()
+                return "valid" in body.lower() or resp.status == 200
+        except urllib.error.HTTPError as e:
+            return e.code != 400 and e.code != 403
+        except Exception:
+            return False
+
+    plaintext = b""
+    for block_idx in range(1, len(blocks)):
+        decrypted_block = bytearray(block_size)
+        for byte_pos in range(block_size - 1, -1, -1):
+            pad_val = block_size - byte_pos
+            prefix = b"".join(blocks[:block_idx - 1])
+            for guess in range(256):
+                modified = bytearray(blocks[block_idx - 1])
+                modified[byte_pos] = guess
+                for k in range(byte_pos + 1, block_size):
+                    modified[k] = decrypted_block[k] ^ pad_val
+                test = prefix + bytes(modified) + blocks[block_idx]
+                if check_padding(test):
+                    decrypted_block[byte_pos] = guess ^ pad_val
+                    break
+
+        plain_block = bytes(x ^ y for x, y in zip(decrypted_block, blocks[block_idx - 1]))
+        plaintext += plain_block
+
+    # Remove padding
+    pad_len = plaintext[-1]
+    if 1 <= pad_len <= block_size:
+        plaintext = plaintext[:-pad_len]
+
+    return f"Decrypted: {plaintext.decode(errors='replace')}\nHex: {plaintext.hex()}"
+
+
+def tool_substitution_solve(ciphertext: str) -> str:
+    """Attempt to solve a simple substitution cipher using frequency analysis."""
+    ct = ciphertext.upper()
+    freq = Counter(c for c in ct if c.isalpha())
+    sorted_chars = [c for c, _ in freq.most_common()]
+    english_order = "ETAOINSHRDLCUMWFGYPBVKJXQZ"
+
+    mapping = {}
+    for i, c in enumerate(sorted_chars):
+        if i < len(english_order):
+            mapping[c] = english_order[i]
+
+    decoded = ""
+    for c in ct:
+        if c.isalpha():
+            decoded += mapping.get(c, "?")
+        else:
+            decoded += c
+
+    # Also try ROT-13 (common in CTFs)
+    rot13 = ""
+    for c in ct:
+        if c.isalpha():
+            base = ord('A')
+            rot13 += chr((ord(c) - base + 13) % 26 + base)
+        else:
+            rot13 += c
+
+    return (f"Frequency-based substitution:\n{decoded}\n\n"
+            f"ROT-13 (common in CTF):\n{rot13}\n\n"
+            f"Frequency map: {mapping}")
+
+
+def tool_hash_crack(hash_value: str, wordlist_path: str, hash_type: str = "auto") -> str:
+    """Crack a hash against a wordlist."""
+    h = hash_value.strip().lower()
+
+    # Auto-detect hash type
+    if hash_type == "auto":
+        if len(h) == 32:
+            hash_type = "md5"
+        elif len(h) == 40:
+            hash_type = "sha1"
+        elif len(h) == 64:
+            hash_type = "sha256"
+        elif len(h) == 128:
+            hash_type = "sha512"
+        else:
+            return f"Cannot auto-detect hash type for length {len(h)}"
+
+    try:
+        with open(wordlist_path, "r", errors="replace") as f:
+            words = f.read().splitlines()
+    except Exception as e:
+        return f"ERROR reading wordlist: {e}"
+
+    for i, word in enumerate(words):
+        computed = hashlib.new(hash_type, word.encode()).hexdigest()
+        if computed == h:
+            return f"CRACKED: {hash_value} = {word} ({hash_type}, attempt {i + 1}/{len(words)})"
+
+    return f"Not cracked. Tried {len(words)} words with {hash_type}."
+
+
+def tool_prng_crack(outputs: list, predict_count: int = 10) -> str:
+    """Crack Mersenne Twister (MT19937) from 624 consecutive 32-bit outputs."""
+    if len(outputs) < 624:
+        return f"Need 624 outputs, got {len(outputs)}. Collect more data."
+
+    def untemper(y):
+        # Reverse the tempering transform of MT19937
+        y = y ^ (y >> 18)
+        y = y ^ ((y << 15) & 0xefc60000)
+        # Reverse y = y ^ ((y << 7) & 0x9d2c5680) — 4 rounds sufficient
+        y = y ^ ((y << 7) & 0x9d2c5680)
+        y = y ^ ((y << 7) & 0x9d2c5680)
+        y = y ^ ((y << 7) & 0x9d2c5680)
+        y = y ^ ((y << 7) & 0x9d2c5680)
+        # Reverse y = y ^ (y >> 11)
+        y = y ^ (y >> 11)
+        y = y ^ (y >> 22)
+        return y & 0xFFFFFFFF
+
+    state = [untemper(o & 0xFFFFFFFF) for o in outputs[:624]]
+
+    def generate(st, index):
+        if index >= 624:
+            for i in range(624):
+                y = (st[i] & 0x80000000) | (st[(i + 1) % 624] & 0x7FFFFFFF)
+                st[i] = st[(i + 397) % 624] ^ (y >> 1)
+                if y & 1:
+                    st[i] ^= 0x9908B0DF
+            index = 0
+
+        y = st[index]
+        y ^= y >> 11
+        y ^= (y << 7) & 0x9D2C5680
+        y ^= (y << 15) & 0xEFC60000
+        y ^= y >> 18
+        return y & 0xFFFFFFFF, index + 1
+
+    predictions = []
+    idx = 624
+    for _ in range(predict_count):
+        val, idx = generate(state, idx)
+        predictions.append(val)
+
+    return (f"MT19937 state recovered from {len(outputs)} outputs.\n"
+            f"Next {predict_count} predicted values:\n" +
+            "\n".join(f"  {i + 1}: {v}" for i, v in enumerate(predictions)))
+
+
+def tool_encoding_chain(data: str, max_depth: int = 10) -> str:
+    """Auto-detect and decode stacked encodings (base64, hex, ROT13)."""
+    results = [f"Input: {data[:100]}{'...' if len(data) > 100 else ''}"]
+    current = data
+
+    for depth in range(max_depth):
+        decoded = None
+        method = None
+
+        # Try base64
+        try:
+            raw = base64.b64decode(current, validate=True)
+            if len(raw) > 0 and all(b < 128 for b in raw):
+                decoded = raw.decode()
+                method = "base64"
+        except Exception:
+            pass
+
+        # Try hex
+        if not decoded:
+            clean = current.strip().replace(" ", "").replace("0x", "")
+            if len(clean) % 2 == 0 and len(clean) >= 2 and all(c in "0123456789abcdefABCDEF" for c in clean):
+                try:
+                    raw = bytes.fromhex(clean)
+                    if all(32 <= b < 127 for b in raw):
+                        decoded = raw.decode()
+                        method = "hex"
+                except Exception:
+                    pass
+
+        # Try ROT13
+        if not decoded:
+            rot = tool_rot_bruteforce(current)
+            for line in rot.split("\n"):
+                if "ROT-13:" in line:
+                    candidate = line.split(":", 1)[1].strip()
+                    common = sum(1 for c in candidate.lower() if c in "etaoinshrdl")
+                    orig_common = sum(1 for c in current.lower() if c in "etaoinshrdl")
+                    if common > orig_common + 3:
+                        decoded = candidate
+                        method = "ROT-13"
+                    break
+
+        if decoded and decoded != current:
+            results.append(f"  Layer {depth + 1} ({method}): {decoded[:100]}")
+            current = decoded
+        else:
+            break
+
+    results.append(f"\nFinal result: {current}")
+    return "\n".join(results)
+
+
 # --- Tool definitions ---
 
 CRYPTO_TOOLS = [
@@ -216,6 +701,124 @@ CRYPTO_TOOLS = [
             "required": ["text"],
         },
     },
+    {
+        "name": "rsa_analyze",
+        "description": "Analyze RSA parameters and attempt common attacks: small-e cube-root, Fermat factorization, Wiener's attack. Provide n, e, c; optionally p and q for direct decryption.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "n": {"type": "integer", "description": "RSA modulus"},
+                "e": {"type": "integer", "description": "RSA public exponent"},
+                "c": {"type": "integer", "description": "Ciphertext (integer)"},
+                "p": {"type": "integer", "description": "Prime factor p (optional)", "default": 0},
+                "q": {"type": "integer", "description": "Prime factor q (optional)", "default": 0},
+            },
+            "required": ["n", "e", "c"],
+        },
+    },
+    {
+        "name": "aes_decrypt",
+        "description": "Decrypt AES-ECB or AES-CBC given hex ciphertext and hex key. Uses PyCryptodome if available.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ciphertext": {"type": "string", "description": "Hex-encoded ciphertext"},
+                "key": {"type": "string", "description": "Hex-encoded AES key (16, 24, or 32 bytes)"},
+                "iv": {"type": "string", "description": "Hex-encoded IV for CBC mode (optional)", "default": ""},
+                "mode": {"type": "string", "description": "AES mode: ECB or CBC (default ECB)", "default": "ECB"},
+            },
+            "required": ["ciphertext", "key"],
+        },
+    },
+    {
+        "name": "vigenere_crack",
+        "description": "Crack a Vigenere cipher using index-of-coincidence key-length estimation and frequency analysis.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ciphertext": {"type": "string", "description": "Vigenere-encrypted ciphertext (alphabetic)"},
+                "max_key_len": {"type": "integer", "description": "Maximum key length to try (default 20)", "default": 20},
+            },
+            "required": ["ciphertext"],
+        },
+    },
+    {
+        "name": "mod_math",
+        "description": "Modular arithmetic: modpow (a^b mod m), modinv (a^-1 mod m), crt (Chinese Remainder Theorem), discrete_log (baby-step giant-step).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "operation": {"type": "string", "description": "Operation: modpow | modinv | crt | discrete_log"},
+                "a": {"type": "integer", "description": "Base / value a", "default": 0},
+                "b": {"type": "integer", "description": "Exponent / value b (modpow, discrete_log)", "default": 0},
+                "m": {"type": "integer", "description": "Modulus", "default": 0},
+                "remainders": {"type": "array", "items": {"type": "integer"}, "description": "Remainders list (crt only)"},
+                "moduli": {"type": "array", "items": {"type": "integer"}, "description": "Moduli list (crt only)"},
+            },
+            "required": ["operation"],
+        },
+    },
+    {
+        "name": "padding_oracle",
+        "description": "Perform a CBC padding oracle attack against a remote oracle endpoint. Sends modified ciphertexts and reads valid/invalid responses.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "oracle_url": {"type": "string", "description": "URL of the padding oracle endpoint"},
+                "ciphertext": {"type": "string", "description": "Hex-encoded ciphertext (IV prepended)"},
+                "block_size": {"type": "integer", "description": "Block size in bytes (default 16)", "default": 16},
+            },
+            "required": ["oracle_url", "ciphertext"],
+        },
+    },
+    {
+        "name": "substitution_solve",
+        "description": "Attempt to solve a simple substitution cipher. Tries frequency-based mapping and ROT-13.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ciphertext": {"type": "string", "description": "Substitution-encrypted ciphertext"},
+            },
+            "required": ["ciphertext"],
+        },
+    },
+    {
+        "name": "hash_crack",
+        "description": "Crack a hash (MD5/SHA1/SHA256/SHA512) against a wordlist file. Auto-detects hash type from length.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "hash_value": {"type": "string", "description": "The hash to crack (hex string)"},
+                "wordlist_path": {"type": "string", "description": "Absolute path to a wordlist file"},
+                "hash_type": {"type": "string", "description": "Hash type: auto | md5 | sha1 | sha256 | sha512", "default": "auto"},
+            },
+            "required": ["hash_value", "wordlist_path"],
+        },
+    },
+    {
+        "name": "prng_crack",
+        "description": "Recover Mersenne Twister (MT19937) internal state from 624 consecutive 32-bit outputs and predict future values.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "outputs": {"type": "array", "items": {"type": "integer"}, "description": "List of 624+ consecutive 32-bit MT19937 outputs"},
+                "predict_count": {"type": "integer", "description": "Number of future values to predict (default 10)", "default": 10},
+            },
+            "required": ["outputs"],
+        },
+    },
+    {
+        "name": "encoding_chain",
+        "description": "Auto-detect and peel stacked encodings (base64, hex, ROT-13) layer by layer.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "data": {"type": "string", "description": "Potentially multi-encoded data string"},
+                "max_depth": {"type": "integer", "description": "Maximum decoding layers to attempt (default 10)", "default": 10},
+            },
+            "required": ["data"],
+        },
+    },
 ]
 
 CRYPTO_DISPATCH = {
@@ -226,6 +829,15 @@ CRYPTO_DISPATCH = {
     "rot_bruteforce": lambda **kw: tool_rot_bruteforce(**kw),
     "xor_bruteforce": lambda **kw: tool_xor_bruteforce(**kw),
     "frequency_analysis": lambda **kw: tool_frequency_analysis(**kw),
+    "rsa_analyze": lambda **kw: tool_rsa_analyze(**kw),
+    "aes_decrypt": lambda **kw: tool_aes_decrypt(**kw),
+    "vigenere_crack": lambda **kw: tool_vigenere_crack(**kw),
+    "mod_math": lambda **kw: tool_mod_math(**kw),
+    "padding_oracle": lambda **kw: tool_padding_oracle(**kw),
+    "substitution_solve": lambda **kw: tool_substitution_solve(**kw),
+    "hash_crack": lambda **kw: tool_hash_crack(**kw),
+    "prng_crack": lambda **kw: tool_prng_crack(**kw),
+    "encoding_chain": lambda **kw: tool_encoding_chain(**kw),
 }
 
 CRYPTO_SYSTEM_PROMPT = """You are a cryptography agent for CTF challenges and authorized security testing.
@@ -233,12 +845,18 @@ Your job is to analyze, decode, and crack encoded or encrypted data.
 
 Strategy:
 1. Examine the input data — look at length, character set, patterns, and structure.
-2. Try common encodings first: base64, hex.
-3. If it looks like a hash, identify it with hash_identify.
-4. If it looks like a substitution cipher, try rot_bruteforce.
+2. Try common encodings first: base64, hex. For stacked encodings use encoding_chain.
+3. If it looks like a hash, identify it with hash_identify; crack it with hash_crack.
+4. If it looks like a substitution cipher, try rot_bruteforce or substitution_solve.
 5. If it might be XOR-encrypted, try xor_bruteforce.
 6. Use frequency_analysis to compare letter distributions to English.
-7. Combine techniques — data may be multi-layered (e.g., base64 wrapping hex wrapping ROT13).
+7. For Vigenere ciphers, use vigenere_crack.
+8. For RSA challenges: use rsa_analyze — try small-e root, Fermat factorization, Wiener's attack.
+9. For AES challenges: use aes_decrypt with the key and IV.
+10. For modular arithmetic (CTF math puzzles): use mod_math (modpow, modinv, crt, discrete_log).
+11. For CBC padding oracle challenges: use padding_oracle with the oracle URL.
+12. For Python random() predictions: use prng_crack with 624 consecutive MT19937 outputs.
+13. Combine techniques — data may be multi-layered.
 
 Report clearly:
 - What encoding/encryption was identified
