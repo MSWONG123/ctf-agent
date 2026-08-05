@@ -1,11 +1,8 @@
 """Blockchain agent — smart contract analysis, ABI/tx decoding, EVM bytecode."""
 
-import hashlib
 import json
 import re
-import struct
 import urllib.request
-import urllib.error
 
 import anthropic
 
