@@ -120,8 +120,14 @@ def format_state_summary(state: dict) -> str:
     return "Targets:\n" + "\n".join(lines)
 
 
-def format_target_findings(state: dict, target: str) -> str:
-    """Return formatted findings for one target."""
+def format_target_findings(state: dict, target: str, max_notes: int = None,
+                           note_chars: int = None) -> str:
+    """Return formatted findings for one target.
+
+    max_notes / note_chars bound the (potentially huge) notes section so callers
+    like the orchestrator can keep their prompt size bounded; defaults are
+    unbounded so the report agent still sees everything.
+    """
     info = state["targets"][target]
     lines = [f"Findings for {target} (status: {info['status']})"]
     f = info["findings"]
@@ -144,7 +150,12 @@ def format_target_findings(state: dict, target: str) -> str:
         for c in f["crypto"]:
             lines.append(f"    - {c}")
     if f["notes"]:
+        notes = f["notes"]
+        if max_notes is not None and len(notes) > max_notes:
+            notes = notes[-max_notes:]
         lines.append(f"  Notes:")
-        for n in f["notes"]:
+        for n in notes:
+            if note_chars is not None and len(n) > note_chars:
+                n = n[:note_chars] + "…(truncated)"
             lines.append(f"    - {n}")
     return "\n".join(lines)

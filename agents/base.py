@@ -9,13 +9,30 @@ import anthropic
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-DEFAULT_MODEL = "claude-sonnet-4-6"
+DEFAULT_MODEL = "claude-sonnet-4-6"       # routine agents + orchestrator routing
+STRONG_MODEL = "claude-opus-5"            # reasoning-heavy categories
+STRONG_AGENTS = {"crypto", "reversing", "blockchain"}
 
 
-def get_model() -> str:
-    """Resolve the model id, honoring RECON_MODEL (single source of truth for
-    the orchestrator, recon plumbing, and every agent)."""
-    return os.getenv("RECON_MODEL", DEFAULT_MODEL)
+def get_model(agent_name: str = None) -> str:
+    """Resolve the model id for an agent (or the orchestrator when agent_name is None).
+
+    Precedence, most specific first:
+      1. RECON_MODEL_<AGENT>   — per-agent override (e.g. RECON_MODEL_CRYPTO)
+      2. RECON_MODEL           — global override forcing one model everywhere
+      3. per-tier default      — STRONG_AGENTS use RECON_STRONG_MODEL/opus-5;
+                                 everything else uses DEFAULT_MODEL/sonnet-4-6
+    """
+    if agent_name:
+        specific = os.getenv(f"RECON_MODEL_{agent_name.upper()}")
+        if specific:
+            return specific
+    global_override = os.getenv("RECON_MODEL")
+    if global_override:
+        return global_override
+    if agent_name in STRONG_AGENTS:
+        return os.getenv("RECON_STRONG_MODEL", STRONG_MODEL)
+    return DEFAULT_MODEL
 
 
 class BaseAgent:
@@ -32,7 +49,7 @@ class BaseAgent:
         self.tools = tools
         self.tool_dispatch = tool_dispatch
         self.client = client
-        self.model = get_model()
+        self.model = get_model(name)
         self.max_iterations = 40
 
     def run(self, task: str, state: dict) -> str:
