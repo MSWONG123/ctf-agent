@@ -30,6 +30,27 @@ def _recv(sock, timeout=2.0):
 
 # --- Tool implementations ---
 
+def _classify(resp: str) -> str:
+    """Classify a model response as '1' (fires), '0' (quiet), or '?' (unknown).
+
+    Uses keyword cues first, then falls back to a trailing 0/1 digit so numeric
+    services (which just reply '1' or '0') are read correctly.
+    """
+    low = resp.lower()
+    if "fires" in low:
+        return "1"
+    if "quiet" in low:
+        return "0"
+    tokens = resp.split()
+    if tokens:
+        last = tokens[-1].strip().strip(".,;:")
+        if last == "1":
+            return "1"
+        if last == "0":
+            return "0"
+    return "?"
+
+
 def tool_probe_model(
     host: str = "", port: int = 0, url: str = "",
     data: str = "", method: str = "tcp"
@@ -52,6 +73,7 @@ def tool_probe_model(
 
     # TCP mode
     key = f"{host}:{port}"
+    banner = ""
     if key not in _connections:
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -60,19 +82,26 @@ def tool_probe_model(
             _connections[key] = s
             time.sleep(0.5)
             banner = _recv(s, timeout=3.0)
-            return f"Connected.\n{banner}"
         except Exception as e:
             return f"ERROR: {e}"
+        # No payload to send: just report the banner from the fresh connection.
+        if not data:
+            return f"Connected.\n{banner}"
+        # Otherwise fall through and send the payload on this same connection.
 
     s = _connections[key]
     try:
         s.sendall((data + "\n").encode())
         time.sleep(0.3)
-        return _recv(s, timeout=1.5) or "(no response)"
+        response = _recv(s, timeout=1.5) or "(no response)"
     except Exception as e:
         if key in _connections:
             del _connections[key]
         return f"ERROR: {e}"
+
+    if banner:
+        return f"Connected.\n{banner}\n{response}"
+    return response
 
 
 def tool_binary_search_boundary(observations: list) -> str:
@@ -111,14 +140,12 @@ def tool_grid_probe_2d(
     for x in x_range:
         row = []
         for y in y_range:
-            data = format_str.format(x=x, y=y)
+            try:
+                data = format_str.format(x=x, y=y)
+            except (KeyError, IndexError, ValueError) as e:
+                return f"ERROR: bad format_str {format_str!r} (expected {{x}} and {{y}} only): {e}"
             resp = tool_probe_model(host=host, port=port, data=data)
-            if "fires" in resp.lower() or "1" in resp.split()[-1:]:
-                row.append("1")
-            elif "quiet" in resp.lower() or "0" in resp.split()[-1:]:
-                row.append("0")
-            else:
-                row.append("?")
+            row.append(_classify(resp))
             results.append({"x": x, "y": y, "output": row[-1], "raw": resp.strip()[:80]})
         # Small delay between rows
         time.sleep(0.1)
@@ -226,7 +253,9 @@ def tool_adversarial_search(
     for i in range(num_steps):
         val = boundary_value + (i - num_steps // 2) * epsilon
         resp = tool_probe_model(host=host, port=port, data=str(val))
-        output = "1" if "fires" in resp.lower() else "0"
+        output = _classify(resp)
+        if output == "?":
+            output = "0"
         results.append(f"  x={val:.6f}: output={output}")
 
     return "Adversarial search results:\n" + "\n".join(results)
@@ -252,6 +281,10 @@ def tool_ascii_pattern_send(
             vals = zero_values
         else:
             vals = one_values
+
+        if not vals:
+            group = "zero_values" if bit == "0" else "one_values"
+            return f"ERROR: {group} is empty — cannot emit bit '{bit}'."
 
         if sequence and sequence[-1] in vals:
             # Pick a different value from the same group.

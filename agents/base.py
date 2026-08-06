@@ -1,5 +1,6 @@
 """Base agent class — shared agentic loop for all agents."""
 
+import os
 import sys
 
 import anthropic
@@ -8,7 +9,13 @@ import anthropic
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-MODEL = "claude-sonnet-4-6"
+DEFAULT_MODEL = "claude-sonnet-4-6"
+
+
+def get_model() -> str:
+    """Resolve the model id, honoring RECON_MODEL (single source of truth for
+    the orchestrator, recon plumbing, and every agent)."""
+    return os.getenv("RECON_MODEL", DEFAULT_MODEL)
 
 
 class BaseAgent:
@@ -25,8 +32,8 @@ class BaseAgent:
         self.tools = tools
         self.tool_dispatch = tool_dispatch
         self.client = client
-        self.model = MODEL
-        self.max_iterations = 20
+        self.model = get_model()
+        self.max_iterations = 40
 
     def run(self, task: str, state: dict) -> str:
         """Run the agentic loop. Returns the final text response.
@@ -38,6 +45,8 @@ class BaseAgent:
         messages = [{"role": "user", "content": task}]
 
         print(f"\n[{self.name}] Starting — {task[:80]}")
+
+        last_text = ""  # most recent text, kept so partial progress is never lost
 
         for iteration in range(1, self.max_iterations + 1):
             print(f"[{self.name}] Iteration {iteration}")
@@ -52,19 +61,21 @@ class BaseAgent:
                 )
             except Exception as e:
                 print(f"[{self.name}] ERROR: API call failed: {e}")
-                return f"ERROR: {e}"
+                # Preserve any progress instead of discarding it on a late error.
+                return last_text + f"\n[ERROR: {e}]" if last_text else f"ERROR: {e}"
 
             messages.append({"role": "assistant", "content": response.content})
 
-            if response.stop_reason == "end_turn":
-                result = ""
-                for block in response.content:
-                    if block.type == "text":
-                        result += block.text
-                print(f"[{self.name}] Done ({iteration} iterations)")
-                return result
+            turn_text = "".join(b.text for b in response.content if b.type == "text")
+            if turn_text:
+                last_text = turn_text
 
-            # Execute tool calls
+            if response.stop_reason == "end_turn":
+                print(f"[{self.name}] Done ({iteration} iterations)")
+                return turn_text
+
+            # Execute tool calls. A tool that raises must NOT crash the agent —
+            # capture the error as the tool result and let the model react.
             tool_results = []
             for block in response.content:
                 if block.type == "tool_use":
@@ -73,10 +84,13 @@ class BaseAgent:
 
                     print(f"  [{self.name}] -> {fn_name}({', '.join(f'{k}={v!r}' for k, v in fn_args.items())})")
 
-                    if fn_name in self.tool_dispatch:
-                        result = self.tool_dispatch[fn_name](**fn_args)
-                    else:
-                        result = f"Unknown tool: {fn_name}"
+                    try:
+                        if fn_name in self.tool_dispatch:
+                            result = self.tool_dispatch[fn_name](**fn_args)
+                        else:
+                            result = f"Unknown tool: {fn_name}"
+                    except Exception as e:
+                        result = f"ERROR: tool '{fn_name}' raised: {e}"
 
                     tool_results.append({
                         "type": "tool_result",
@@ -86,6 +100,12 @@ class BaseAgent:
 
             if tool_results:
                 messages.append({"role": "user", "content": tool_results})
+            else:
+                # Not end_turn and no tool call (e.g. a max_tokens truncation):
+                # there is nothing to send back. Return what we have rather than
+                # looping to send a message that ends on an assistant turn.
+                print(f"[{self.name}] Stopped early (stop_reason={response.stop_reason}) with no tool call.")
+                return last_text or f"(stopped: stop_reason={response.stop_reason})"
 
         print(f"[{self.name}] WARNING: max iterations reached")
-        return "Max iterations reached without final response."
+        return last_text or "Max iterations reached without final response."

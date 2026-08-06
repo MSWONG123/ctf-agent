@@ -1,6 +1,47 @@
 """Shared in-memory state store for the agent harness."""
 
+import json
+import os
+import re
 from datetime import datetime, timezone
+
+
+def save_state(state: dict, path: str) -> None:
+    """Serialize state to a JSON file so a run is resumable after a crash/exit."""
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+
+
+def load_state(path: str) -> dict:
+    """Load state from a JSON file, or return a fresh state if it doesn't exist."""
+    if not os.path.exists(path):
+        return create_state()
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return create_state()
+
+_PORT_RE = re.compile(r"(\d{1,5})/(?:tcp|udp)\s+open", re.IGNORECASE)
+_FLAG_RE = re.compile(r"[A-Za-z0-9_]{2,}\{[^}\n]{1,200}\}")
+
+
+def extract_signals(text: str):
+    """Pull structured signal (open ports, flags) out of an agent's free text.
+
+    Returns (sorted unique ports, unique flag strings) so the orchestrator can
+    reason over real findings instead of a perpetually-empty structured state.
+    """
+    ports = sorted({int(p) for p in _PORT_RE.findall(text) if 0 < int(p) <= 65535})
+    flags = list(dict.fromkeys(_FLAG_RE.findall(text)))
+    return ports, flags
+
+
+def record_agent_run(state: dict, target: str, agent_name: str) -> None:
+    """Record that an agent has run against a target (for multi-phase tracking)."""
+    runs = state["targets"][target].setdefault("agents_run", [])
+    if agent_name not in runs:
+        runs.append(agent_name)
 
 
 def create_state() -> dict:
@@ -15,6 +56,7 @@ def add_target(state: dict, target: str) -> None:
     state["targets"][target] = {
         "status": "pending",
         "assigned_agent": "",
+        "agents_run": [],
         "findings": {
             "ports": [],
             "services": {},
@@ -70,7 +112,11 @@ def format_state_summary(state: dict) -> str:
     for target, info in state["targets"].items():
         port_count = len(info["findings"]["ports"])
         vuln_count = len(info["findings"]["vulns"])
-        lines.append(f"  {target:30s} status={info['status']:10s} ports={port_count} vulns={vuln_count}")
+        agents_run = ",".join(info.get("agents_run", [])) or "-"
+        lines.append(
+            f"  {target:30s} status={info['status']:10s} "
+            f"ports={port_count} vulns={vuln_count} agents_run=[{agents_run}]"
+        )
     return "Targets:\n" + "\n".join(lines)
 
 

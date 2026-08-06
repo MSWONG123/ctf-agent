@@ -166,6 +166,12 @@ def tool_solidity_analyze(source_code: str = "", file_path: str = "") -> str:
     return f"Found {len(findings)} potential issues:\n\n" + "\n\n".join(findings)
 
 
+def _int_width(t: str) -> int:
+    """Bit width from an int/uint type name ('int' -> 256, 'int8' -> 8)."""
+    digits = "".join(ch for ch in t if ch.isdigit())
+    return int(digits) if digits else 256
+
+
 def tool_abi_decode(data: str, types: str, includes_selector: bool = False) -> str:
     """Decode ABI-encoded data given type list."""
     clean = data.replace("0x", "").replace(" ", "")
@@ -183,9 +189,29 @@ def tool_abi_decode(data: str, types: str, includes_selector: bool = False) -> s
             results.append(f"{t}: <insufficient data>")
             break
         word = clean[offset:offset + 64]
-        if t.startswith("uint") or t.startswith("int"):
+        if t in ("string", "bytes"):
+            # Dynamic type: the head word is a byte offset into the args area,
+            # pointing at [length word][data].
+            pos = int(word, 16) * 2
+            if pos + 64 <= len(clean):
+                length = int(clean[pos:pos + 64], 16)
+                data_hex = clean[pos + 64: pos + 64 + length * 2]
+                if t == "string":
+                    text = bytes.fromhex(data_hex).decode("utf-8", "replace") if data_hex else ""
+                    results.append(f"{t}: {text!r}")
+                else:
+                    results.append(f"{t}: 0x{data_hex}")
+            else:
+                results.append(f"{t}: <dynamic offset out of range>")
+        elif t.startswith("uint"):
             val = int(word, 16)
             results.append(f"{t}: {val} (0x{val:x})")
+        elif t.startswith("int"):
+            bits = _int_width(t)
+            val = int(word, 16) & ((1 << bits) - 1)
+            if val >= (1 << (bits - 1)):
+                val -= 1 << bits           # two's complement
+            results.append(f"{t}: {val}")
         elif t == "address":
             addr = "0x" + word[24:]
             results.append(f"{t}: {addr}")
@@ -193,7 +219,9 @@ def tool_abi_decode(data: str, types: str, includes_selector: bool = False) -> s
             val = int(word, 16)
             results.append(f"{t}: {bool(val)}")
         elif t.startswith("bytes"):
-            results.append(f"{t}: 0x{word}")
+            # Fixed bytesN is left-aligned in the word.
+            n = _int_width(t) if any(ch.isdigit() for ch in t) else 32
+            results.append(f"{t}: 0x{word[:n * 2]}")
         else:
             results.append(f"{t}: 0x{word} (raw)")
         offset += 64
