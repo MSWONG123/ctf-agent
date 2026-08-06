@@ -85,10 +85,16 @@ class Orchestrator:
         """Ask the LLM what to do next based on current state."""
         state_summary = format_state_summary(self.state)
 
-        # Include detailed findings for each target
+        # Bounded detailed findings — cap notes so the orchestrator prompt can't
+        # grow without limit (and overflow the context window) as a run
+        # accumulates agent output.
         details = ""
         for target in self.state["targets"]:
-            details += format_target_findings(self.state, target) + "\n\n"
+            details += format_target_findings(
+                self.state, target, max_notes=3, note_chars=600
+            ) + "\n\n"
+        if len(details) > 6000:
+            details = details[:6000] + "\n…(findings truncated — see report for full output)"
 
         recent_history = "\n".join(self.state["history"][-10:]) if self.state["history"] else "No actions yet."
 
@@ -103,12 +109,18 @@ Recent history:
 
 What should we do next?"""
 
-        response = self.client.messages.create(
-            model=MODEL,
-            system=ORCHESTRATOR_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=500,
-        )
+        try:
+            response = self.client.messages.create(
+                model=MODEL,
+                system=ORCHESTRATOR_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=500,
+            )
+        except Exception as e:
+            # Don't let a transient error / over-length prompt kill the loop;
+            # returning "" makes the start loop stop cleanly (state is persisted).
+            print(f"  [Orchestrator] ERROR: proposal request failed: {e}")
+            return ""
 
         for block in response.content:
             if block.type == "text":
