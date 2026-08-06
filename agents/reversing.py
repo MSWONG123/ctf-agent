@@ -167,6 +167,46 @@ def tool_checksec(file_path: str) -> str:
     return "\n".join(results)
 
 
+def _elf_vaddr_to_offset(data: bytes, vaddr: int):
+    """Map a virtual address to a file offset via ELF PT_LOAD segments.
+
+    Returns the file offset, or None if no loadable segment contains vaddr.
+    Needed because e_entry (and symbol values) are virtual addresses, not file
+    offsets — slicing the file at a vaddr reads the wrong bytes.
+    """
+    if data[:4] != b"\x7fELF":
+        return None
+    is_64 = data[4] == 2
+    fmt = "<" if data[5] == 1 else ">"
+    try:
+        if is_64:
+            e_phoff = struct.unpack_from(fmt + "Q", data, 32)[0]
+            e_phentsize = struct.unpack_from(fmt + "H", data, 54)[0]
+            e_phnum = struct.unpack_from(fmt + "H", data, 56)[0]
+        else:
+            e_phoff = struct.unpack_from(fmt + "I", data, 28)[0]
+            e_phentsize = struct.unpack_from(fmt + "H", data, 42)[0]
+            e_phnum = struct.unpack_from(fmt + "H", data, 44)[0]
+        for i in range(e_phnum):
+            off = e_phoff + i * e_phentsize
+            p_type = struct.unpack_from(fmt + "I", data, off)[0]
+            if p_type != 1:  # PT_LOAD
+                continue
+            if is_64:
+                p_offset = struct.unpack_from(fmt + "Q", data, off + 8)[0]
+                p_vaddr = struct.unpack_from(fmt + "Q", data, off + 16)[0]
+                p_filesz = struct.unpack_from(fmt + "Q", data, off + 32)[0]
+            else:
+                p_offset = struct.unpack_from(fmt + "I", data, off + 4)[0]
+                p_vaddr = struct.unpack_from(fmt + "I", data, off + 8)[0]
+                p_filesz = struct.unpack_from(fmt + "I", data, off + 16)[0]
+            if p_vaddr <= vaddr < p_vaddr + p_filesz:
+                return vaddr - p_vaddr + p_offset
+    except struct.error:
+        return None
+    return None
+
+
 def tool_disassemble(file_path: str, function: str = "", start_addr: str = "", num_instructions: int = 50) -> str:
     """Disassemble binary. Tries objdump, then capstone, else error."""
     if shutil.which("objdump"):
@@ -196,8 +236,13 @@ def tool_disassemble(file_path: str, function: str = "", start_addr: str = "", n
             else:
                 md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
                 entry = struct.unpack_from("<I", data, 24)[0]
+            # e_entry is a virtual address; translate to a file offset so we
+            # disassemble the real entry code, keeping the vaddr as the label.
+            file_off = _elf_vaddr_to_offset(data, entry)
+            if file_off is None:
+                file_off = entry
             lines = []
-            for i, (addr, size, mnem, op_str) in enumerate(md.disasm_lite(data[entry:], entry)):
+            for i, (addr, size, mnem, op_str) in enumerate(md.disasm_lite(data[file_off:], entry)):
                 lines.append(f"  0x{addr:x}:  {mnem} {op_str}")
                 if i >= num_instructions:
                     break

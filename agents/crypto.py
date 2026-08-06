@@ -136,6 +136,25 @@ def tool_frequency_analysis(text: str) -> str:
     return "\n".join(lines)
 
 
+def _iroot(x: int, n: int) -> int:
+    """Return floor(x ** (1/n)) using integer binary search (no float overflow)."""
+    if x < 0:
+        raise ValueError("x must be non-negative")
+    if x == 0:
+        return 0
+    hi = 1
+    while hi ** n <= x:
+        hi <<= 1
+    lo = hi >> 1
+    while lo < hi:
+        mid = (lo + hi + 1) >> 1
+        if mid ** n <= x:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
+
 def tool_rsa_analyze(n: int, e: int, c: int, p: int = 0, q: int = 0) -> str:
     """Analyze RSA parameters and attempt common attacks."""
     results = [f"RSA Analysis: n={n}, e={e}, c={c}"]
@@ -167,12 +186,16 @@ def tool_rsa_analyze(n: int, e: int, c: int, p: int = 0, q: int = 0) -> str:
                 except Exception:
                     pass
                 return "\n".join(results)
-        # Try integer e-th root
-        m_approx = int(round(c ** (1.0 / e)))
-        for delta in range(-2, 3):
-            m_test = m_approx + delta
+        # Try exact integer e-th root (works for any size, unlike float **).
+        m_root = _iroot(c, e)
+        for m_test in (m_root - 1, m_root, m_root + 1):
             if m_test > 0 and pow(m_test, e) == c:
                 results.append(f"SUCCESS: m = {m_test}")
+                try:
+                    plaintext = m_test.to_bytes((m_test.bit_length() + 7) // 8, "big").decode(errors="replace")
+                    results.append(f"Plaintext: {plaintext}")
+                except Exception:
+                    pass
                 return "\n".join(results)
         results.append("Small-e root attack: no exact root found (c may be reduced mod n)")
 
@@ -671,18 +694,27 @@ def tool_prng_crack(outputs: list, predict_count: int = 10) -> str:
     if len(outputs) < 624:
         return f"Need 624 outputs, got {len(outputs)}. Collect more data."
 
+    def _undo_right(value, shift):
+        # Invert value = x ^ (x >> shift). XOR the constant `value` each pass
+        # (NOT the running result) so it converges to x.
+        result = value
+        for _ in range(0, 32, shift):
+            result = value ^ (result >> shift)
+        return result & 0xFFFFFFFF
+
+    def _undo_left(value, shift, mask):
+        # Invert value = x ^ ((x << shift) & mask).
+        result = value
+        for _ in range(0, 32, shift):
+            result = value ^ ((result << shift) & mask)
+        return result & 0xFFFFFFFF
+
     def untemper(y):
-        # Reverse the tempering transform of MT19937
-        y = y ^ (y >> 18)
-        y = y ^ ((y << 15) & 0xefc60000)
-        # Reverse y = y ^ ((y << 7) & 0x9d2c5680) — 4 rounds sufficient
-        y = y ^ ((y << 7) & 0x9d2c5680)
-        y = y ^ ((y << 7) & 0x9d2c5680)
-        y = y ^ ((y << 7) & 0x9d2c5680)
-        y = y ^ ((y << 7) & 0x9d2c5680)
-        # Reverse y = y ^ (y >> 11)
-        y = y ^ (y >> 11)
-        y = y ^ (y >> 22)
+        # Reverse the tempering transform of MT19937, in reverse order.
+        y = _undo_right(y, 18)
+        y = _undo_left(y, 15, 0xEFC60000)
+        y = _undo_left(y, 7, 0x9D2C5680)
+        y = _undo_right(y, 11)
         return y & 0xFFFFFFFF
 
     state = [untemper(o & 0xFFFFFFFF) for o in outputs[:624]]

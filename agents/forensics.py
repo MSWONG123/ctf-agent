@@ -7,6 +7,7 @@ import shutil
 import struct
 import subprocess
 import zipfile
+import zlib
 
 import anthropic
 
@@ -159,6 +160,53 @@ def tool_file_carve(file_path: str, offset: int, length: int, output_path: str =
         return f"ERROR: {e}"
 
 
+def _png_unfilter(raw: bytes, width: int, height: int, bit_depth: int, color_type: int) -> bytes:
+    """Reverse PNG scanline filters to recover the raw pixel bytes.
+
+    LSB stego lives in the *unfiltered* pixels; reading the decompressed (still
+    filtered) stream — including the per-scanline filter-type byte — yields
+    garbage for any image that uses a filter other than None.
+    """
+    channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(color_type, 1)
+    bits_per_pixel = channels * bit_depth
+    bpp = max(1, bits_per_pixel // 8)
+    stride = (width * bits_per_pixel + 7) // 8
+
+    out = bytearray()
+    prev = bytearray(stride)
+    pos = 0
+    for _ in range(height):
+        if pos + 1 + stride > len(raw):
+            break
+        ftype = raw[pos]
+        pos += 1
+        line = bytearray(raw[pos:pos + stride])
+        pos += stride
+        if ftype == 1:  # Sub
+            for i in range(stride):
+                a = line[i - bpp] if i >= bpp else 0
+                line[i] = (line[i] + a) & 0xFF
+        elif ftype == 2:  # Up
+            for i in range(stride):
+                line[i] = (line[i] + prev[i]) & 0xFF
+        elif ftype == 3:  # Average
+            for i in range(stride):
+                a = line[i - bpp] if i >= bpp else 0
+                line[i] = (line[i] + ((a + prev[i]) >> 1)) & 0xFF
+        elif ftype == 4:  # Paeth
+            for i in range(stride):
+                a = line[i - bpp] if i >= bpp else 0
+                b = prev[i]
+                c = prev[i - bpp] if i >= bpp else 0
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+                line[i] = (line[i] + pr) & 0xFF
+        out += line
+        prev = line
+    return bytes(out)
+
+
 def tool_stego_lsb(file_path: str, num_bits: int = 1, num_bytes: int = 256) -> str:
     """Extract LSB steganography from a PNG/BMP image."""
     try:
@@ -183,35 +231,36 @@ def tool_stego_lsb(file_path: str, num_bits: int = 1, num_bytes: int = 256) -> s
         printable = decoded.decode(errors="replace")
         return f"LSB extraction ({len(result_bytes)} bytes):\nHex: {decoded[:64].hex()}\nASCII: {printable[:256]}"
 
-    # PNG: extract from IDAT pixel data (simplified)
+    # PNG: extract from unfiltered IDAT pixel data
     if data[:8] == b"\x89PNG\r\n\x1a\n":
-        # Find IDAT chunks
+        width = height = bit_depth = color_type = 0
         idat_data = b""
         i = 8
-        while i < len(data) - 8:
+        while i + 8 <= len(data):
             chunk_len = struct.unpack(">I", data[i:i + 4])[0]
             chunk_type = data[i + 4:i + 8]
-            if chunk_type == b"IDAT":
-                idat_data += data[i + 8:i + 8 + chunk_len]
+            body = data[i + 8:i + 8 + chunk_len]
+            if chunk_type == b"IHDR" and len(body) >= 10:
+                width, height, bit_depth, color_type = struct.unpack(">IIBB", body[:10])
+            elif chunk_type == b"IDAT":
+                idat_data += body
+            elif chunk_type == b"IEND":
+                break
             i += 12 + chunk_len
 
-        if idat_data:
-            # Decompress
-            import zlib
+        if idat_data and width and height:
             try:
                 raw = zlib.decompress(idat_data)
-                bits = []
-                for byte in raw[:num_bytes * 8]:
-                    bits.append(str(byte & 1))
-                result_bytes = []
-                for j in range(0, len(bits) - 7, 8):
-                    b = int("".join(bits[j:j + 8]), 2)
-                    result_bytes.append(b)
-                decoded = bytes(result_bytes)
-                printable = decoded.decode(errors="replace")
-                return f"LSB extraction ({len(result_bytes)} bytes):\nHex: {decoded[:64].hex()}\nASCII: {printable[:256]}"
             except Exception as e:
                 return f"PNG decompression error: {e}"
+            pixels = _png_unfilter(raw, width, height, bit_depth, color_type)
+            bits = [str(byte & 1) for byte in pixels[:num_bytes * 8]]
+            result_bytes = []
+            for j in range(0, len(bits) - 7, 8):
+                result_bytes.append(int("".join(bits[j:j + 8]), 2))
+            decoded = bytes(result_bytes)
+            printable = decoded.decode(errors="replace")
+            return f"LSB extraction ({len(result_bytes)} bytes):\nHex: {decoded[:64].hex()}\nASCII: {printable[:256]}"
 
     return "Unsupported image format for LSB extraction. Use BMP or PNG."
 
@@ -433,6 +482,12 @@ def tool_zip_crack(zip_path: str, wordlist_path: str) -> str:
     except Exception as e:
         return f"ERROR opening ZIP: {e}"
 
+    encrypted = [zi for zi in zf.infolist() if zi.flag_bits & 0x1]
+    if not encrypted:
+        return f"ZIP is not encrypted — no password needed. Files: {zf.namelist()}"
+
+    target = encrypted[0]
+
     try:
         with open(wordlist_path, "r", errors="replace") as wl:
             words = wl.read().splitlines()
@@ -441,10 +496,16 @@ def tool_zip_crack(zip_path: str, wordlist_path: str) -> str:
 
     for i, pwd in enumerate(words):
         try:
-            zf.extractall(pwd=pwd.encode())
+            # Reading one byte forces the CRC/password check without writing
+            # any files to disk (extractall would drop files into cwd).
+            with zf.open(target, pwd=pwd.encode()) as fh:
+                fh.read(1)
             return f"Password found: {pwd} (attempt {i + 1}/{len(words)})\nFiles: {zf.namelist()}"
         except (RuntimeError, zipfile.BadZipFile):
             continue
+        except NotImplementedError:
+            return ("ERROR: entry uses unsupported encryption/compression "
+                    "(e.g. WinZip AES) that Python's zipfile cannot crack.")
         except Exception:
             continue
 

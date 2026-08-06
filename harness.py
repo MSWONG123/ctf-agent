@@ -23,7 +23,7 @@ from recon_agent import load_api_key
 from state import (
     create_state, add_target, set_target_status, add_history,
     update_findings, format_state_summary, format_target_findings,
-    get_pending_targets,
+    get_pending_targets, extract_signals, record_agent_run,
 )
 
 MODEL = os.getenv("RECON_MODEL", "claude-sonnet-4-6")
@@ -122,21 +122,40 @@ What should we do next?"""
 
         result = agent.run(task, self.state)
 
+        # Extract structured signal (open ports, flags) so the orchestrator
+        # reasons over real findings instead of a perpetually-empty state.
+        ports, flags = extract_signals(result)
+        existing_ports = set(self.state["targets"][target]["findings"]["ports"])
+        new_ports = [p for p in ports if p not in existing_ports]
+        if new_ports:
+            update_findings(self.state, target, "ports", new_ports)
+        if flags:
+            update_findings(self.state, target, "vulns", [f"FLAG: {f}" for f in flags])
+
         # Store the agent's output into state so the report agent can see it
         update_findings(self.state, target, "notes", [f"[{agent_name}] {result}"])
 
-        set_target_status(self.state, target, "done")
+        # Record which agent ran; keep the target open so later phases
+        # (recon -> web_exploit -> crypto) can still run instead of being
+        # cut off by a premature 'done'.
+        record_agent_run(self.state, target, agent_name)
+        set_target_status(self.state, target, "analyzed")
         add_history(self.state, f"Completed {agent_name} on {target}")
 
         return result
 
     def parse_proposal(self, proposal: str) -> dict:
-        """Parse the orchestrator's ACTION/TARGET/TASK/REASON response."""
+        """Parse the orchestrator's ACTION/TARGET/TASK/REASON response.
+
+        Tolerant of both multi-line output and single-line pipe-delimited output
+        ("ACTION: x | TARGET: y | ..."), and case-insensitive in the field keys.
+        """
         parsed = {}
-        for line in proposal.strip().split("\n"):
+        for seg in re.split(r"[\n|]", proposal.strip()):
+            seg = seg.strip()
             for key in ["ACTION", "TARGET", "TASK", "REASON"]:
-                if line.strip().upper().startswith(key + ":"):
-                    parsed[key.lower()] = line.split(":", 1)[1].strip()
+                if seg.upper().startswith(key + ":"):
+                    parsed[key.lower()] = seg.split(":", 1)[1].strip()
         return parsed
 
 
@@ -232,21 +251,38 @@ def main():
                 continue
 
             print("\n  Starting orchestration loop...\n")
+            max_steps = 50
+            steps = 0
             while True:
+                steps += 1
+                if steps > max_steps:
+                    print(f"  [Orchestrator] Reached step cap ({max_steps}). Generating report...")
+                    path = generate_report(state, client)
+                    print(f"  Report saved to: {path}")
+                    break
+
                 proposal_text = orch.propose_action()
                 parsed = orch.parse_proposal(proposal_text)
 
-                if not parsed.get("action"):
+                action = parsed.get("action", "").strip().lower()
+
+                if not action:
                     print(f"  [Orchestrator] {proposal_text}")
                     break
 
-                if parsed["action"] == "report":
+                if action == "report":
                     print("  [Orchestrator] All targets scanned. Generating report...")
                     path = generate_report(state, client)
                     print(f"  Report saved to: {path}")
                     break
 
-                action = parsed.get("action", "?")
+                # Validate against the known agents so a malformed proposal can't
+                # spin the loop forever on an unrecognized (no-op) action.
+                if action not in orch.agents:
+                    print(f"  [Orchestrator] Unrecognized action '{action}'. Stopping to avoid a loop.")
+                    add_history(state, f"Unrecognized action: {action}")
+                    break
+
                 target = parsed.get("target", "?")
                 task = parsed.get("task", "?")
                 reason = parsed.get("reason", "")
@@ -269,6 +305,12 @@ def main():
 
                 if approve == "y":
                     if target not in state["targets"]:
+                        # Validate LLM-proposed targets with the same regex used
+                        # for CLI-entered ones, so scope can't silently expand.
+                        if not re.match(r'^[a-zA-Z0-9._:\-/]+$', target):
+                            print(f"    ERROR: Invalid target format '{target}'. Skipping.")
+                            add_history(state, f"Rejected malformed target: {target}")
+                            continue
                         add_target(state, target)
                     result = orch.dispatch(action, target, task)
                     print(f"\n  [Result preview] {result[:300]}...")
