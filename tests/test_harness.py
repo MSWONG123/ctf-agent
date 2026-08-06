@@ -54,7 +54,7 @@ def test_orchestrator_has_all_agents():
     client = MagicMock()
     state = create_state()
     orch = Orchestrator(client, state)
-    expected = {"recon", "web_exploit", "crypto", "netcat", "reversing", "forensics", "blockchain", "ai_ml"}
+    expected = {"recon", "web_exploit", "crypto", "netcat", "reversing", "forensics", "blockchain", "ai_ml", "exploit"}
     assert set(orch.agents.keys()) == expected
 
 

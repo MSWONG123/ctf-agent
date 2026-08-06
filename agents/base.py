@@ -11,7 +11,7 @@ sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 DEFAULT_MODEL = "claude-sonnet-4-6"       # routine agents + orchestrator routing
 STRONG_MODEL = "claude-opus-5"            # reasoning-heavy categories
-STRONG_AGENTS = {"crypto", "reversing", "blockchain"}
+STRONG_AGENTS = {"crypto", "reversing", "blockchain", "exploit"}
 
 
 def get_model(agent_name: str = None) -> str:
