@@ -18,6 +18,7 @@ from agents.reversing import create_reversing_agent
 from agents.forensics import create_forensics_agent
 from agents.blockchain import create_blockchain_agent
 from agents.ai_ml import create_ai_ml_agent
+from agents.exploit import create_exploit_agent
 from agents.report import generate_report
 from recon_agent import load_api_key
 from agents.base import get_model
@@ -42,6 +43,7 @@ Available agents:
 - blockchain: Smart contract analysis, Solidity vulns, ABI/tx decoding, EVM bytecode
 - ai_ml: Model probing, boundary finding, weight recovery, adversarial inputs
 - netcat: Raw interactive TCP sessions (fallback for live socket IO)
+- exploit: Write and run complete Python exploit scripts (pwntools ROP/heap/remote, web3+solcx on-chain drains, custom crypto/misc) to weaponize a found vulnerability
 
 Based on the current state of all targets, propose the SINGLE best next action.
 
@@ -60,6 +62,7 @@ Rules:
 - Run ai_ml when challenge involves a model, perceptron, or classifier.
 - Run crypto when encoded/encrypted data is found.
 - Run netcat as fallback for interactive services not covered by other agents.
+- Run exploit AFTER another agent has identified a concrete vulnerability that needs weaponizing into a working exploit (buffer overflow/ROP, reentrancy/on-chain, custom crypto).
 - If all targets are fully scanned, respond with: ACTION: report
 - Be specific in TASK — reference actual ports, paths, and findings."""
 
@@ -79,6 +82,7 @@ class Orchestrator:
             "forensics": lambda: create_forensics_agent(client),
             "blockchain": lambda: create_blockchain_agent(client),
             "ai_ml": lambda: create_ai_ml_agent(client),
+            "exploit": lambda: create_exploit_agent(client),
         }
 
     def propose_action(self) -> str:

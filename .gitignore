@@ -6,3 +6,4 @@ tools/
 *.pyc
 reports/
 harness_state.json
+exploit_workspace/
