@@ -5,3 +5,4 @@ tools/
 .superpowers/
 *.pyc
 reports/
+harness_state.json

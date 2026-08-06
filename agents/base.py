@@ -1,5 +1,6 @@
 """Base agent class — shared agentic loop for all agents."""
 
+import os
 import sys
 
 import anthropic
@@ -8,7 +9,13 @@ import anthropic
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-MODEL = "claude-sonnet-4-6"
+DEFAULT_MODEL = "claude-sonnet-4-6"
+
+
+def get_model() -> str:
+    """Resolve the model id, honoring RECON_MODEL (single source of truth for
+    the orchestrator, recon plumbing, and every agent)."""
+    return os.getenv("RECON_MODEL", DEFAULT_MODEL)
 
 
 class BaseAgent:
@@ -25,7 +32,7 @@ class BaseAgent:
         self.tools = tools
         self.tool_dispatch = tool_dispatch
         self.client = client
-        self.model = MODEL
+        self.model = get_model()
         self.max_iterations = 40
 
     def run(self, task: str, state: dict) -> str:

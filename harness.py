@@ -20,13 +20,16 @@ from agents.blockchain import create_blockchain_agent
 from agents.ai_ml import create_ai_ml_agent
 from agents.report import generate_report
 from recon_agent import load_api_key
+from agents.base import get_model
 from state import (
     create_state, add_target, set_target_status, add_history,
     update_findings, format_state_summary, format_target_findings,
     get_pending_targets, extract_signals, record_agent_run,
+    save_state, load_state,
 )
 
-MODEL = os.getenv("RECON_MODEL", "claude-sonnet-4-6")
+MODEL = get_model()
+STATE_PATH = os.getenv("HARNESS_STATE", "harness_state.json")
 
 ORCHESTRATOR_SYSTEM_PROMPT = """You are a CTF orchestrator. You coordinate specialized agents to attack targets.
 
@@ -62,9 +65,10 @@ Rules:
 
 
 class Orchestrator:
-    def __init__(self, client: anthropic.Anthropic, state: dict):
+    def __init__(self, client: anthropic.Anthropic, state: dict, state_path: str = None):
         self.client = client
         self.state = state
+        self.state_path = state_path
         self.auto_mode = True
         self.agents = {
             "recon": lambda: create_recon_agent(client),
@@ -142,6 +146,10 @@ What should we do next?"""
         set_target_status(self.state, target, "analyzed")
         add_history(self.state, f"Completed {agent_name} on {target}")
 
+        # Persist after each agent so a crash/exit doesn't lose progress.
+        if self.state_path:
+            save_state(self.state, self.state_path)
+
         return result
 
     def parse_proposal(self, proposal: str) -> dict:
@@ -162,8 +170,10 @@ What should we do next?"""
 def main():
     api_key = load_api_key()
     client = anthropic.Anthropic(api_key=api_key)
-    state = create_state()
-    orch = Orchestrator(client, state)
+    state = load_state(STATE_PATH)  # resume prior run if present
+    orch = Orchestrator(client, state, state_path=STATE_PATH)
+    if state["targets"]:
+        print(f"  [+] Resumed {len(state['targets'])} target(s) from {STATE_PATH}")
 
     print("=" * 60)
     print("  CTF AGENT HARNESS")

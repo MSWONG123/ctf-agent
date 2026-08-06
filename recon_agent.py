@@ -34,7 +34,9 @@ sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 # Config
 # ---------------------------------------------------------------------------
 
-MODEL = os.getenv("RECON_MODEL", "claude-sonnet-4-6")
+from agents.base import get_model
+
+MODEL = get_model()  # single source of truth (honors RECON_MODEL)
 
 # Add local tools and nmap to PATH
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))

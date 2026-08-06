@@ -1,7 +1,26 @@
 """Shared in-memory state store for the agent harness."""
 
+import json
+import os
 import re
 from datetime import datetime, timezone
+
+
+def save_state(state: dict, path: str) -> None:
+    """Serialize state to a JSON file so a run is resumable after a crash/exit."""
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+
+
+def load_state(path: str) -> dict:
+    """Load state from a JSON file, or return a fresh state if it doesn't exist."""
+    if not os.path.exists(path):
+        return create_state()
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return create_state()
 
 _PORT_RE = re.compile(r"(\d{1,5})/(?:tcp|udp)\s+open", re.IGNORECASE)
 _FLAG_RE = re.compile(r"[A-Za-z0-9_]{2,}\{[^}\n]{1,200}\}")
